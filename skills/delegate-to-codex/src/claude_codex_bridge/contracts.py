@@ -17,7 +17,7 @@ MODEL_RE = re.compile(r"^[^\s\x00-\x1f\x7f-\x9f-][^\s\x00-\x1f\x7f-\x9f]{0,127}$
 RISK_LEVELS = {"low", "medium", "high"}
 # Defaults for fields that are almost always the same, so the lead writes only task-specific values.
 DEFAULT_MAX_TURNS = 6
-DEFAULT_TIMEOUT_SECONDS = 900
+DEFAULT_TIMEOUT_SECONDS = 1800
 TASK_FIELDS = {
     "task_id",
     "repo_root",
@@ -243,8 +243,8 @@ def validate_task(raw: dict[str, Any], *, allow_missing_validation: bool = False
     ):
         raise ContractError("max_extensions must be a non-negative integer when present")
     timeout_seconds = raw.get("timeout_seconds", DEFAULT_TIMEOUT_SECONDS)
-    if not isinstance(timeout_seconds, int) or isinstance(timeout_seconds, bool) or not 5 <= timeout_seconds <= 1800:
-        raise ContractError("timeout_seconds must be an integer from 5 through 1800")
+    if not isinstance(timeout_seconds, int) or isinstance(timeout_seconds, bool) or not 5 <= timeout_seconds <= 7200:
+        raise ContractError("timeout_seconds must be an integer from 5 through 7200")
 
     validation = raw.get("validation_command")
     if validation is not None:
@@ -262,8 +262,8 @@ def validate_task(raw: dict[str, Any], *, allow_missing_validation: bool = False
     if mode in {"implement", "test"} and validation_command is None and not allow_missing_validation:
         raise ContractError(f"{mode} tasks require a validation_command")
     validation_timeout = raw.get("validation_timeout_seconds", 600)
-    if not isinstance(validation_timeout, int) or isinstance(validation_timeout, bool) or not 1 <= validation_timeout <= 1800:
-        raise ContractError("validation_timeout_seconds must be an integer from 1 through 1800")
+    if not isinstance(validation_timeout, int) or isinstance(validation_timeout, bool) or not 1 <= validation_timeout <= 7200:
+        raise ContractError("validation_timeout_seconds must be an integer from 1 through 7200")
 
     allow_subagents = raw.get("allow_subagents", False)
     if allow_subagents is not False:

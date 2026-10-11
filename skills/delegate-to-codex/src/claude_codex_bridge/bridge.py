@@ -33,7 +33,7 @@ from .gitops import (
     tree_diff, tree_diffstat, utc_now, utc_stamp, validate_task_id, worktree_hazards, worktree_integrity_problems,
 )
 from .process import ProcessResult, run_process, system_tool, which
-from .revision import (MAX_CODEX_REVISION_TURNS, context_path_observed, load_feedback, revision_target_state,
+from .revision import (MAX_CODEX_REVISION_TURNS, context_path_claimed, context_path_observed, load_feedback, revision_target_state,
                        safe_relative_path, ensure_no_links)
 from .state import (PACKAGE_ROOT, ensure_state_root, state_root, short_worktree_path,
                     recorded_worktree, artifact_owns_worktree)
@@ -123,6 +123,10 @@ ENV_ALLOW = frozenset({
     "COMMONPROGRAMFILES(X86)", "COMMONPROGRAMW6432", "PUBLIC", "ALLUSERSPROFILE", "JAVA_HOME", "LANG", "LANGUAGE",
     "TZ", "TERM", "SHELL", "OS", "NUMBER_OF_PROCESSORS"})
 ENV_ALLOW_PREFIXES = ("PYTHON", "LC_", "PROCESSOR_")
+# Folder shortcuts that project tools and task contexts use instead of paths with awkward characters (a repos
+# folder whose name holds an apostrophe and a space). They are plain paths, never secrets, so both children keep
+# them, and the report names them.
+PATH_ENV_ALLOW = frozenset({"REPOS", "WORKSPACES"})
 # What the Codex process itself needs to reach its service with its own sign-in (never an API key).
 WORKER_ENV_ALLOW = frozenset({"CODEX_HOME", "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "ALL_PROXY", "SSL_CERT_FILE",
                               "SSL_CERT_DIR", "NODE_EXTRA_CA_CERTS", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE"})
@@ -144,7 +148,7 @@ def scrub_environment(source: Mapping[str, str] | None = None, *, extra_allow: I
     otherwise it is kept only when allowed. Returns the environment and a report of names only: which were
     dropped and which were passed because the lead asked, never a value.
     """
-    allow = ENV_ALLOW | {name.upper() for name in extra_allow}
+    allow = ENV_ALLOW | PATH_ENV_ALLOW | {name.upper() for name in extra_allow}
     opted = {name.upper() for name in passthrough}
     kept: dict[str, str] = {}
     dropped: list[str] = []
@@ -160,7 +164,9 @@ def scrub_environment(source: Mapping[str, str] | None = None, *, extra_allow: I
             kept[name] = value
         else:
             dropped.append(name)
-    return kept, {"kept": len(kept), "dropped": sorted(dropped, key=str.upper), "passthrough": sorted(passed)}
+    paths = sorted(name for name in kept if name.upper() in PATH_ENV_ALLOW)
+    return kept, {"kept": len(kept), "dropped": sorted(dropped, key=str.upper), "passthrough": sorted(passed),
+                  "path_variables": paths}
 
 
 def _pin_variable(environment: dict[str, str], name: str, value: str) -> None:
@@ -641,12 +647,32 @@ def extension_of(claim: dict[str, Any] | None) -> dict[str, Any] | None:
     return request
 
 
-def _context_evidence(task: Task, parsed: dict[str, Any]) -> dict[str, Any]:
+def _context_evidence(task: Task, parsed: dict[str, Any], claim: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Which named context paths this segment's commands mention, plus those the worker lists in ``files_read``.
+
+    Claimed reads are kept apart (``claimed_context_paths``) because the worker's own list is not bridge-side
+    evidence; they still count as read, so the warning is left for paths nobody reports reading.
+    """
     text = "\n".join(str(c.get("command") or "") for c in parsed["commands"]).replace("\\", "/").lower()
     observed = [p for p in task.context_paths if context_path_observed(p, text)]
-    missing = [p for p in task.context_paths if p not in observed]
+    files_read = claim.get("files_read") if isinstance(claim, dict) and isinstance(claim.get("files_read"), list) else []
+    claimed = [p for p in task.context_paths if p not in observed and context_path_claimed(p, files_read)]
+    missing = [p for p in task.context_paths if p not in observed and p not in claimed]
     return {"status": "verified" if not missing else "not_observed", "method": "command transcript match",
-            "observed_context_paths": observed, "missing_context_paths": missing}
+            "observed_context_paths": observed, "claimed_context_paths": claimed, "missing_context_paths": missing}
+
+
+def _run_context_missing(task: Task, prior: dict[str, Any] | None, current: dict[str, Any]) -> list[str]:
+    """Context paths that no segment of the run (earlier ones included) observed or reported reading.
+
+    A continuation resumes the same session, so a file read in segment 1 is still known to segment 3.
+    """
+    seen: set[str] = set()
+    for evidence in [s.get("context_evidence") for s in (prior or {}).get("segments") or []] + [current]:
+        if isinstance(evidence, dict):
+            seen.update(evidence.get("observed_context_paths") or [])
+            seen.update(evidence.get("claimed_context_paths") or [])
+    return [p for p in task.context_paths if p not in seen]
 
 
 # ------------------------------------------------------------------ auto-review
@@ -753,7 +779,7 @@ def _segment(command: CodexCommand, task: Task, worktree: Path, artifact: Path, 
     checkpoint = None
     if claim is None and parsed["thread_id"] and not process.interrupted and (process.exit_code == 0 or time_cap):
         claim, error, checkpoint = _checkpoint(command, task, worktree, artifact, label, parsed["thread_id"], effort,
-                                               env, auto_review)
+                                               env, auto_review, time_cap=time_cap)
     failure_text = parsed["turn_failed"] or (parsed["errors"][-1] if parsed["errors"] and process.exit_code else None)
     error_kind = classify_error(failure_text)
     rejections = process.stderr.count(POLICY_REJECTION)
@@ -775,21 +801,26 @@ def _segment(command: CodexCommand, task: Task, worktree: Path, artifact: Path, 
             "error_kind": error_kind, "failure_text": failure_text, "policy_warning": policy_warning,
             "policy_rejections": rejections, "ignored_before": ignored_before, "ignored_stamps": ignored_stamps,
             "environment": env_report,
-            "context_evidence": _context_evidence(task, parsed),
+            "context_evidence": _context_evidence(task, parsed, claim),
             "approvals": _segment_approvals(parsed, process)}
 
 
 def _checkpoint(command: CodexCommand, task: Task, worktree: Path, artifact: Path, label: str, thread_id: str,
                 effort: str | None, env: Mapping[str, str] | None = None,
-                auto_review: bool = False) -> tuple[dict | None, str | None, dict[str, Any]]:
+                auto_review: bool = False, time_cap: bool = False) -> tuple[dict | None, str | None, dict[str, Any]]:
     writing = task.mode in WRITING_MODES
     try:
         before = _worktree_fingerprint(worktree, task.base_commit) if writing else None
     except (WorktreeTampered, UnsafeWorktree):
         before = None  # the worktree is already unreadable: _finish reports it and no claim can be trusted
-    prompt = ("Do not run commands or change files. Report a structured account of the work already done in this "
-              "session as the required JSON object: complete only if finished, blocked if unable to continue, or "
-              "extension_requested with exact remaining work. Do not claim reads or changes that did not happen.")
+    reason = ("This segment reached its time limit (set by the bridge, not a request from the user to stop); "
+              "work that is not finished is normally reported as extension_requested. "
+              if time_cap else "Your final message was not the required JSON report (this is the bridge asking, "
+              "not the user telling you to stop). ")
+    prompt = (reason + "Do not run commands or change files now. Report a structured account of the work already done in "
+              "this session as the required JSON object: complete only if finished; extension_requested with the "
+              "exact remaining work when the work can continue; blocked only for an external cause you cannot "
+              "resolve. Do not claim reads or changes that did not happen.")
     process, parsed, final = _run_codex(command, task, worktree, artifact, f"{label}.checkpoint", prompt,
                                         sandbox="read-only", effort=effort, resume=thread_id,
                                         timeout=min(task.timeout_seconds, CHECKPOINT_TIMEOUT_SECONDS), env=env,
@@ -814,7 +845,7 @@ def _checkpoint(command: CodexCommand, task: Task, worktree: Path, artifact: Pat
 def _process_record(result: ProcessResult) -> dict[str, Any]:
     return {"exit_code": result.exit_code, "elapsed_seconds": result.elapsed_seconds,
             "timed_out": result.timed_out, "interrupted": result.interrupted,
-            "output_truncated": result.output_truncated}
+            "output_truncated": result.output_truncated, "orphans_killed": result.orphans_killed}
 
 
 # ------------------------------------------------------------------ files the worker hid from the patch
@@ -833,6 +864,19 @@ MAX_RECORDED_PATHS = 50
 def _is_build_output(path: str) -> bool:
     parts = PurePosixPath(path).parts
     return (any(part.lower() in BUILD_OUTPUT_DIRECTORIES or part.lower().endswith(".egg-info") for part in parts[:-1])
+            or parts[-1].lower().endswith(BUILD_OUTPUT_SUFFIXES))
+
+
+# Folders whose contents are the expected by-product of a Gradle, Maven, npm or Python build or test run. A worker
+# creating files there is routine, so it is recorded in the result (ignored_build_output_files) but not warned about.
+STANDARD_BUILD_DIRECTORIES = frozenset({
+    "build", ".gradle", "out", "target", "dist", "run", "__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache",
+    "htmlcov", ".tox", ".nox", ".hypothesis"})
+
+
+def _is_standard_build_output(path: str) -> bool:
+    parts = PurePosixPath(path).parts
+    return (any(part.lower() in STANDARD_BUILD_DIRECTORIES for part in parts[:-1])
             or parts[-1].lower().endswith(BUILD_OUTPUT_SUFFIXES))
 
 
@@ -1183,11 +1227,24 @@ def _validation(task: Task, worktree: Path, artifact: Path, keep: Iterable[str] 
     return record, None if status == "passed" else "independent validation failed"
 
 
-def _validation_warnings(validation: dict[str, Any]) -> list[str]:
+ORPHANS_KILLED_WARNING = ("a background process (e.g. a Gradle daemon) kept the output open after the command "
+                          "finished and was stopped")
+
+
+def _validation_warnings(validation: dict[str, Any], task: Task | None = None) -> list[str]:
     warnings: list[str] = []
-    if validation.get("byproduct_paths"):
+    if (validation.get("process") or {}).get("orphans_killed"):
+        warnings.append(ORPHANS_KILLED_WARNING)
+    byproducts = list(validation.get("byproduct_paths") or [])
+    covered = [p for p in byproducts if task is not None and path_allowed(p, task.allowed_changed_paths)]
+    uncovered = [p for p in byproducts if p not in covered]
+    if covered:
+        warnings.append(f"validation created {len(covered)} file(s) inside the task's allowed paths (generated "
+                        "output now in the patch; review or remove before acceptance): "
+                        + _count_label(covered, 2))
+    if uncovered:
         warnings.append("validation created files in the worktree (remove or ignore them before acceptance): "
-                        + ", ".join(validation["byproduct_paths"]))
+                        + ", ".join(uncovered))
     if validation.get("removed_bytecode_without_source"):
         warnings.append("deleted Python bytecode that has no source file beside it (validation would have run code "
                         "that is not in the patch): " + _count_label(validation["removed_bytecode_without_source"]))
@@ -1358,8 +1415,10 @@ def _finish(task: Task, artifact: Path, worktree: Path, seg: dict[str, Any], pri
         failures.append("extension requested without a resumable session ID")
     if seg["parsed"]["forbidden_items"]:
         failures.append("Codex used forbidden tools: " + ", ".join(sorted(set(seg["parsed"]["forbidden_items"]))))
-    if seg["context_evidence"]["status"] != "verified":
-        warnings.append(f"context not observed: {len(seg['context_evidence']['missing_context_paths'])} named paths (see result.json)")
+    context_missing = _run_context_missing(task, prior, seg["context_evidence"])
+    if context_missing:
+        warnings.append(f"context not observed: {len(context_missing)} named path(s) never read in any segment: "
+                        + _count_label(context_missing, 3))
     if writing and claim is not None and claim["status"] == "complete" and not unusable:
         claimed, outside = _normalized_claims(worktree, claim["files_changed"])
         if outside:
@@ -1392,9 +1451,11 @@ def _finish(task: Task, artifact: Path, worktree: Path, seg: dict[str, Any], pri
             if ignored_created:
                 failures.append("worker created git-ignored files that the patch cannot carry, so validation would "
                                 "run against files the lead never sees: " + _count_label(ignored_created))
-            if build_output:
-                warnings.append("worker created build output in git-ignored folders; it is not in the patch, but "
-                                "validation can read it: " + _count_label(build_output))
+            unexpected_output = [path for path in build_output if not _is_standard_build_output(path)]
+            if unexpected_output:
+                warnings.append(f"worker created {len(unexpected_output)} file(s) in git-ignored non-standard output "
+                                "folders; not in the patch, but validation can read them: "
+                                + _count_label(unexpected_output, 2))
             inputs = _inventory_files(prior)
             changed_inputs = _changed_inputs(worktree, prior, since_validation=True)
             if changed_inputs:
@@ -1407,12 +1468,17 @@ def _finish(task: Task, artifact: Path, worktree: Path, seg: dict[str, Any], pri
                                 "and validation can read it: " + _count_label(edited_ignored))
     diff_path = artifact / "diff.patch"
     write_json(artifact / "changed-paths.json", changed)
+    if process.orphans_killed:
+        warnings.append(ORPHANS_KILLED_WARNING)
     if process.output_truncated:
         warnings.append("the worker's output exceeded the capture limit and the middle of its saved transcript was "
                         "dropped; token totals, command records, declined commands and forbidden-tool checks were "
                         "read from the whole stream as it arrived, so they stay exact, but the saved events and "
                         "stderr files cannot show the dropped part")
-    if seg["parsed"].get("events_unreadable"):
+    if seg["parsed"].get("events_unreadable") and (process.timed_out or process.interrupted):
+        warnings.append("the bridge stopped the worker at its time limit, so its last output line was cut off; the "
+                        "events before it were read in full")
+    elif seg["parsed"].get("events_unreadable"):
         failures.append("worker events could not be read (a line over the size limit, a failed stream callback, "
                         "or output that arrived after the run ended), so a forbidden-tool or declined-command event "
                         "may be hidden; the result cannot be accepted")
@@ -1431,7 +1497,7 @@ def _finish(task: Task, artifact: Path, worktree: Path, seg: dict[str, Any], pri
         _note_validated_inputs(worktree, prior)
         if validation_error:
             failures.append(validation_error)
-        warnings += _validation_warnings(validation)
+        warnings += _validation_warnings(validation, task)
         again_failures, again_warnings, primary_unchanged = _primary_findings(task, artifact, primary_before,
                                                                               guard_before)
         failures += again_failures
@@ -1509,6 +1575,8 @@ def _finish(task: Task, artifact: Path, worktree: Path, seg: dict[str, Any], pri
         "ignored_build_output_files": build_output[:MAX_RECORDED_PATHS],
         "inputs_changed_by_worker": changed_inputs[:MAX_RECORDED_PATHS],
         "segments": (list(prior.get("segments", [])) if prior else []) + [segment_record],
+        "context_evidence": {"status": "not_observed" if context_missing else "verified",
+                             "missing_context_paths": context_missing},
         "run_settings": run_settings,
         "auto_review": run_settings.get("auto_review", "off"),
         "auto_review_source": run_settings.get("auto_review_source"),
@@ -2095,8 +2163,8 @@ def revalidate(task_file: Path, artifact_path: Path, timeout: int | None = None,
     """
     task, artifact, _, prior = _load_prior(task_file, artifact_path)
     if timeout is not None:
-        if isinstance(timeout, bool) or not isinstance(timeout, int) or not 1 <= timeout <= 1800:
-            raise BridgeError("validation timeout must be an integer from 1 through 1800")
+        if isinstance(timeout, bool) or not isinstance(timeout, int) or not 1 <= timeout <= 7200:
+            raise BridgeError("validation timeout must be an integer from 1 through 7200")
         task = replace(task, validation_timeout_seconds=timeout)
     with _lock(task, task_file, "revalidate"):
         _, artifact, _, prior = _load_prior(task_file, artifact_path)
@@ -2147,7 +2215,7 @@ def revalidate(task_file: Path, artifact_path: Path, timeout: int | None = None,
         primary_after = primary_status(task)  # after validation, which ran code the worker wrote
         _write_text(artifact / "primary-status.after.txt", primary_after)
         prior["primary_checkout_unchanged"] = primary_after == primary_before
-        for warning in _validation_warnings(validation):
+        for warning in _validation_warnings(validation, task):
             _add_warning(prior, warning)
         keep_extension = lifecycle == "EXTENSION_REQUESTED"
         changed = changed_paths(worktree, task.base_commit) if task.mode in WRITING_MODES else []
@@ -2604,6 +2672,8 @@ def brief(record: dict[str, Any]) -> dict[str, Any]:
         environment = segments[-1].get("environment")
         if isinstance(environment, dict):
             out["worker_environment_dropped"] = len(environment.get("dropped", []))
+            if environment.get("path_variables"):
+                out["worker_environment_paths"] = environment["path_variables"]
     if validation.get("environment"):
         out["validation_environment_dropped"] = len(validation["environment"].get("dropped", []))
     if "usage_before" in record or "usage_after" in record:

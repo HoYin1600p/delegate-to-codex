@@ -325,6 +325,20 @@ class Identifiers(RepoCase):
         self.assertTrue(observed("README.md", "cat readme.md"))
         self.assertFalse(observed("README.md", "cat notes.md"))
 
+    def test_context_paths_are_also_claimed_through_files_read(self):
+        claimed = revision.context_path_claimed
+        self.assertTrue(claimed("src/app.py", ["src\\app.py"]))
+        self.assertTrue(claimed("SRC/App.py", ["./src/app.py"]))
+        self.assertTrue(claimed("src/app.py", ["C:/work/repo/src/app.py"]))
+        self.assertTrue(claimed("src/**", ["src/deep/app.py"]))
+        self.assertFalse(claimed("src/**", ["src-other/app.py"]))
+        self.assertFalse(claimed("src/app.py", ["src/app.pyc", "other/app.py"]))
+        self.assertFalse(claimed("src/app.py", []))
+
+    def test_doubled_separators_in_a_command_still_match(self):
+        self.assertTrue(revision.context_path_observed("src/app.py", "get-content src\\\\app.py"))
+        self.assertTrue(revision.context_path_observed("src/**", "ls src//deep"))
+
 
 class RenameScope(unittest.TestCase):
     def test_changed_paths_reports_both_ends_of_a_move(self):

@@ -172,6 +172,18 @@ class Runs(BridgeCase):
         checkpoint = [c for c in self.calls() if c["argv"][:2] == ["exec", "resume"]][-1]
         self.assertIn('sandbox_mode="read-only"', checkpoint["argv"])
 
+    def test_checkpoint_prompt_names_the_time_limit_only_when_the_cap_was_hit(self):
+        os.environ["FAKE_CODEX_SCENARIO"] = "slow"
+        capped = bridge.run(self.task(timeout_seconds=5))
+        prompt = (Path(capped["artifact_directory"]) / "initial.checkpoint.prompt.txt").read_text(encoding="utf-8")
+        self.assertIn("time limit", prompt)
+        self.assertIn("extension_requested", prompt)
+        os.environ["FAKE_CODEX_SCENARIO"] = "badjson"
+        missing = bridge.run(self.task())
+        prompt = (Path(missing["artifact_directory"]) / "initial.checkpoint.prompt.txt").read_text(encoding="utf-8")
+        self.assertNotIn("time limit", prompt)
+        self.assertIn("not the required JSON report", prompt)
+
     def test_unstructured_reply_triggers_checkpoint(self):
         os.environ["FAKE_CODEX_SCENARIO"] = "badjson"
         result = bridge.run(self.task())
@@ -352,7 +364,7 @@ class Efficiency(BridgeCase):
         path = self.tmp / "minimal.json"
         path.write_text(json.dumps(minimal), encoding="utf-8")
         task = load_task(path)
-        self.assertEqual((task.max_turns, task.timeout_seconds, task.validation_timeout_seconds), (6, 900, 600))
+        self.assertEqual((task.max_turns, task.timeout_seconds, task.validation_timeout_seconds), (6, 1800, 600))
         self.assertEqual(task.forbidden_context, ())
         self.assertFalse(task.allow_subagents)
         self.assertTrue(task.require_subscription_auth)
@@ -872,9 +884,55 @@ class Recovery(BridgeCase):
     def test_revalidation_timeout_limits(self):
         task = self.task()
         first = bridge.run(task)
-        for timeout in (0, 1801, True):
-            with self.subTest(timeout=timeout), self.assertRaisesRegex(Exception, "1 through 1800"):
+        for timeout in (0, 7201, True):
+            with self.subTest(timeout=timeout), self.assertRaisesRegex(Exception, "1 through 7200"):
                 bridge.revalidate(task, Path(first["artifact_directory"]), timeout)
+
+
+class ReportWarningNoise(BridgeCase):
+    def test_context_read_in_an_earlier_segment_counts_for_the_whole_run(self):
+        task = load_task(self.task(context_paths=["README.md", "src/**", "docs/guide.md", "lib/x.py"]))
+        first = {"observed_context_paths": ["README.md"], "claimed_context_paths": [],
+                 "missing_context_paths": ["src/**", "docs/guide.md", "lib/x.py"]}
+        second = {"observed_context_paths": [], "claimed_context_paths": ["src/**"],
+                  "missing_context_paths": ["README.md", "docs/guide.md", "lib/x.py"]}
+        prior = {"segments": [{"context_evidence": first}]}
+        self.assertEqual(bridge._run_context_missing(task, prior, second), ["docs/guide.md", "lib/x.py"])
+        self.assertEqual(bridge._run_context_missing(task, None, second), ["README.md", "docs/guide.md", "lib/x.py"])
+
+    def test_files_the_worker_lists_as_read_satisfy_context_but_stay_separate_from_observed(self):
+        task = load_task(self.task(context_paths=["README.md", "src/**", "lib/x.py"]))
+        parsed = {"commands": [{"command": "rg -n foo README.md"}]}
+        claim = {"files_read": ["src\\app.py", "docs/other.md"]}
+        evidence = bridge._context_evidence(task, parsed, claim)
+        self.assertEqual(evidence["observed_context_paths"], ["README.md"])
+        self.assertEqual(evidence["claimed_context_paths"], ["src/**"])
+        self.assertEqual(evidence["missing_context_paths"], ["lib/x.py"])
+        self.assertEqual(bridge._context_evidence(task, parsed)["missing_context_paths"], ["src/**", "lib/x.py"])
+
+    def test_an_unread_context_path_is_still_named_in_one_warning_and_the_record(self):
+        result = bridge.run(self.task(context_paths=["README.md", "never_read.md"]))
+        lines = [w for w in result["warnings"] if w.startswith("context not observed")]
+        self.assertEqual(len(lines), 1, result["warnings"])
+        self.assertIn("1 named path(s)", lines[0])
+        self.assertIn("never_read.md", lines[0])
+        self.assertEqual(result["context_evidence"]["missing_context_paths"], ["never_read.md"])
+        clean = bridge.run(self.task(context_paths=["README.md"]))
+        self.assertFalse(any(w.startswith("context not observed") for w in clean["warnings"]), clean["warnings"])
+
+    def test_validation_created_files_inside_allowed_paths_make_one_counted_line(self):
+        task = load_task(self.task(allowed_changed_paths=["hello.py", "src/generated/**"]))
+        generated = [f"src/generated/res/f{n}.json" for n in range(40)]
+        validation = {"byproduct_paths": generated}
+        lines = bridge._validation_warnings(validation, task)
+        self.assertEqual(len(lines), 1, lines)
+        self.assertIn("40 file(s)", lines[0])
+        self.assertLess(len(lines[0]), 400)
+        outside = bridge._validation_warnings({"byproduct_paths": generated[:2] + ["stray.txt"]}, task)
+        self.assertEqual(len(outside), 2, outside)
+        self.assertIn("stray.txt", outside[1])
+        self.assertNotIn("stray.txt", outside[0])
+        self.assertEqual(len(bridge._validation_warnings({"byproduct_paths": ["stray.txt"]}, task)), 1)
 
 
 class BridgeEndToEnd(BridgeCase):
@@ -1341,6 +1399,15 @@ class CapturedOutputIsBounded(BridgeCase):
         self.assertTrue(skipped["segments"][0]["events_unreadable"])
         self.assertTrue(any("could not be read" in f for f in skipped["failures"]), skipped["failures"])
         self.assertEqual(skipped["lifecycle_status"], "BLOCKED")
+
+    def test_a_cut_off_event_line_after_the_bridge_stopped_the_worker_only_warns(self):
+        os.environ["FAKE_CODEX_SCENARIO"] = "slow"
+        with mock.patch.object(process, "MAX_LINE_CHARS", 20):
+            result = bridge.run(self.task(timeout_seconds=5), effort=None)
+        self.assertTrue(result["segments"][0]["process"]["timed_out"])
+        self.assertTrue(result["segments"][0]["events_unreadable"])
+        self.assertFalse(any("could not be read" in f for f in result["failures"]), result["failures"])
+        self.assertTrue(any("last output line was cut off" in w for w in result["warnings"]), result["warnings"])
 
     def test_a_stream_abandoned_at_return_makes_the_events_unreadable(self):
         task = load_task(self.task())

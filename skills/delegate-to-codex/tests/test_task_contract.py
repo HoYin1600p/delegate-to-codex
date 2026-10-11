@@ -205,6 +205,18 @@ class SchemaMatchesValidator(unittest.TestCase):
         read_only = self.case(mode="review", allowed_changed_paths=[], validation_command=KeyError)
         self.assertTrue(self.accepted_by_validator(read_only))
 
+    def test_timeouts_accept_up_to_7200_seconds_and_default_to_1800(self):
+        for key, low in (("timeout_seconds", 5), ("validation_timeout_seconds", 1)):
+            with self.subTest(key=key):
+                self.assertTrue(self.accepted_by_validator(self.case(**{key: 7200})))
+                self.assertFalse(self.accepted_by_validator(self.case(**{key: 7201})))
+                self.assertFalse(self.accepted_by_validator(self.case(**{key: low - 1})))
+                self.assertTrue(schema_accepts(self.schema, self.case(**{key: 7200})))
+                self.assertFalse(schema_accepts(self.schema, self.case(**{key: 7201})))
+                self.assertEqual(self.schema["properties"][key]["maximum"], 7200)
+        self.assertEqual(self.schema["properties"]["timeout_seconds"]["default"], 1800)
+        self.assertEqual(validate_task(self.case(timeout_seconds=KeyError)).timeout_seconds, 1800)
+
     def test_unusual_mode_and_risk_values_give_contract_errors(self):
         for key, value in (("mode", ["implement"]), ("mode", {"a": 1}), ("risk", ["low"]), ("risk", {"a": 1})):
             with self.subTest(key=key, value=value):

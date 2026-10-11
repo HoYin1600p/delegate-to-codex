@@ -34,13 +34,13 @@ One JSON file per task, saved outside the repository. Start from [assets/task.te
 | `plan_status` | `READY` | Only `READY` is accepted. |
 | `model` | `null` | One identifier: no whitespace, not starting with `-`. `run --model` overrides it for that run. |
 | `max_turns` | 6 | 1-12. A budget of work steps told to the worker for one segment, not a Codex turn cap. |
-| `timeout_seconds` | 900 | 5-1800. Bounds one worker segment. |
+| `timeout_seconds` | 1800 | 5-7200. Bounds one worker segment. |
 | `max_total_turns` | none | Ignored. Still accepted so a task file written for 1.0.0 loads; use `max_turns`, `timeout_seconds` and `max_extensions`. |
 | `max_extensions` | none | Caps automatic continuation grants (with `auto_continue`) only; your own `continue` commands are never counted or capped. |
 | `auto_continue` | 0 | 0-3 automatic continuation grants, each only after measurable progress. |
 | `copy_ignored` | none | Repo-relative git-ignored files, folders or globs copied into the worktree before launch (200 MB total). Details in [setup](setup.md#local-inputs-copy_ignored). Same path rules as above, wildcards allowed. |
 | `validation_command` | none | 1-24 non-empty strings. The program is resolved from PATH, an absolute path, or a repository path (in the base commit or under `allowed_changed_paths`). Python is run with `-B`. |
-| `validation_timeout_seconds` | 600 | 1-1800. Allow the real runtime plus margin: a validation that times out is killed and can have an empty output tail. |
+| `validation_timeout_seconds` | 600 | 1-7200. Allow the real runtime plus margin: a validation that times out is killed and can have an empty output tail. |
 | `allow_subagents` | `false` | Only `false` is accepted. |
 | `require_subscription_auth` | `true` | Only `true` is accepted. |
 | `auto_review` | `null` | `null` follows the user's auto-review setting. `false` turns Codex auto-review off for this task. `true` cannot turn it on: while the user setting is off it is ignored and the result carries a warning, so one task file stays valid on every machine. [Safety](safety.md#auto-review). |
@@ -61,6 +61,13 @@ Give paths, decisions and criteria, not pasted files or history. Reasoning effor
   caches. With auto-review on, the worker is told to rerun such a build command with escalated permissions;
   with it off, give the worker a task that does not need the build tool, and let validation (which runs as
   you) build.
+
+- Let the worker run the project's own build, data-generation and test steps. A task that forbids them leaves
+  the worker unable to finish, and it reports `blocked`. With auto-review on, it asks for the permissions those
+  steps need.
+- Size `timeout_seconds` to the slowest step the worker must run (a Gradle build plus game tests often needs
+  45-90 minutes, up to 7200 seconds). When a segment does hit the limit, the worker is told it was a time limit
+  and reports `extension_requested`, so `continue` (or `auto_continue`) carries the work on instead of discarding it.
 
 ## Revision feedback
 

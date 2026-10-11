@@ -169,6 +169,36 @@ class ProcessTreeKill(unittest.TestCase):
         self.assertLess(elapsed, 1 + 1.0 + 5 + 3)  # timeout + grace + leader wait + slack
         self.assertEqual(result.stdout.split()[0], str(child_pid))  # what was read so far is kept
 
+    def test_orphan_holding_the_pipes_after_the_leader_exits_is_killed_after_the_grace(self):
+        pid_file = Path(tempfile.gettempdir()) / f"delegate-orphan-{os.getpid()}.pid"
+        self.addCleanup(pid_file.unlink, missing_ok=True)
+        with mock.patch.object(process, "LEADER_EXIT_PIPE_GRACE_SECONDS", 2.0):
+            started = time.monotonic()
+            result = process.run_process(PYTHON, ["-c", ORPHANING_PARENT, str(pid_file)],
+                                         cwd=tempfile.gettempdir(), timeout_seconds=300)
+            elapsed = time.monotonic() - started
+        self.child_pid = int(pid_file.read_text(encoding="utf-8"))
+        self.assertTrue(result.orphans_killed)
+        self.assertFalse(result.timed_out)
+        self.assertEqual(result.exit_code, 0)
+        self.assertLess(elapsed, 2.0 + 10)
+        self.assertEqual(result.stdout.split()[0], str(self.child_pid))
+        self.assertTrue(wait_gone(self.child_pid), "orphan holding the pipes survived")
+
+    def test_orphan_that_escaped_the_kill_still_returns_after_the_grace(self):
+        pid_file = Path(tempfile.gettempdir()) / f"delegate-orphan-escaped-{os.getpid()}.pid"
+        self.addCleanup(pid_file.unlink, missing_ok=True)
+        with mock.patch.object(process, "_kill_tree"), mock.patch.object(process, "OUTPUT_GRACE_SECONDS", 1.0), \
+                mock.patch.object(process, "LEADER_EXIT_PIPE_GRACE_SECONDS", 1.0):
+            started = time.monotonic()
+            result = process.run_process(PYTHON, ["-c", ORPHANING_PARENT, str(pid_file)],
+                                         cwd=tempfile.gettempdir(), timeout_seconds=300, on_stdout_line=lambda line: None)
+            elapsed = time.monotonic() - started
+        self.addCleanup(kill_pid, int(pid_file.read_text(encoding="utf-8")))
+        self.assertTrue(result.orphans_killed)
+        self.assertTrue(result.stdout_abandoned)
+        self.assertLess(elapsed, 1.0 + 1.0 + 5 + 3)
+
     def test_normal_run_is_unaffected(self):
         with tempfile.TemporaryDirectory() as tmp:
             result = process.run_process(PYTHON, ["-c", "print('ok')"], cwd=tmp, timeout_seconds=30)

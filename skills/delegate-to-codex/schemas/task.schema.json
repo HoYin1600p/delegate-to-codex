@@ -141,9 +141,9 @@
     "timeout_seconds": {
       "type": "integer",
       "minimum": 5,
-      "maximum": 1800,
-      "default": 900,
-      "description": "Seconds for one worker segment (5-1800)."
+      "maximum": 7200,
+      "default": 1800,
+      "description": "Seconds for one worker segment (5-7200)."
     },
     "validation_command": {
       "type": [
@@ -161,9 +161,9 @@
     "validation_timeout_seconds": {
       "type": "integer",
       "minimum": 1,
-      "maximum": 1800,
+      "maximum": 7200,
       "default": 600,
-      "description": "Seconds for the bridge's validation run (1-1800); allow the real runtime plus margin."
+      "description": "Seconds for the bridge's validation run (1-7200); allow the real runtime plus margin."
     },
     "allow_subagents": {
       "const": false,

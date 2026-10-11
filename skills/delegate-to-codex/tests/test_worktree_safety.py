@@ -335,7 +335,7 @@ class IgnoredFiles(BridgeCase):
             result = bridge.run(self.task())
         self.assertEqual(result["lifecycle_status"], "REVIEW_PENDING", result["failures"])
         self.assertEqual(result["ignored_build_output_files"], ["build/out.txt"])
-        self.assertTrue(any("build output" in w and "build/out.txt" in w for w in result["warnings"]), result["warnings"])
+        self.assertFalse(any("git-ignored" in w for w in result["warnings"]), result["warnings"])  # expected output
         self.assertEqual(result["ignored_files_created"], [])
         self.assertFalse((Path(result["worktree"]) / "__pycache__" / "hello.cpython-312.pyc").exists())
 
@@ -599,9 +599,28 @@ class HiddenBytecode(BridgeCase):
             result = bridge.run(self.task())
         self.assertEqual(result["lifecycle_status"], "REVIEW_PENDING", result["failures"])
         self.assertEqual(result["ignored_build_output_files"], ["build/deep/x.o", "build/out.bin"])
-        self.assertTrue(any("build output" in w and "build/out.bin" in w and "build/deep/x.o" in w
-                            for w in result["warnings"]), result["warnings"])
+        self.assertFalse(any("git-ignored" in w for w in result["warnings"]), result["warnings"])
         self.assertTrue((Path(result["worktree"]) / "build" / "out.bin").exists())  # not deleted: only named
+
+    def test_build_output_outside_the_standard_folders_gets_one_short_warning_with_a_count(self):
+        (self.repo / ".gitignore").write_text("*.cfg\n__pycache__/\nbuild/\n*.egg-info/\n", encoding="utf-8")
+        self.commit_all("ignore egg-info")
+
+        def edit(worktree):
+            for name in ("one", "two", "three"):
+                (worktree / "pkg.egg-info").mkdir(exist_ok=True)
+                (worktree / "pkg.egg-info" / name).write_text("x", encoding="utf-8")
+            (worktree / "build").mkdir()
+            (worktree / "build" / "out.bin").write_bytes(b"\0")
+
+        with self.after_segment(edit):
+            result = bridge.run(self.task())
+        self.assertEqual(result["lifecycle_status"], "REVIEW_PENDING", result["failures"])
+        self.assertEqual(len(result["ignored_build_output_files"]), 4)  # the record keeps everything
+        lines = [w for w in result["warnings"] if "git-ignored" in w]
+        self.assertEqual(len(lines), 1, result["warnings"])
+        self.assertIn("3 file(s)", lines[0])
+        self.assertNotIn("build/out.bin", lines[0])
 
 
 if __name__ == "__main__":

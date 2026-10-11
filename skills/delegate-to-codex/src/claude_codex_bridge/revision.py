@@ -119,13 +119,31 @@ def context_path_observed(context_path: str, transcript: str) -> bool:
     case-insensitive substrings; backslashes count as slashes on both sides.
     """
     wanted = context_path.replace("\\", "/").lower()
-    text = transcript.replace("\\", "/").lower()
+    text = re.sub(r"/{2,}", "/", transcript.replace("\\", "/").lower())
     if not wanted.endswith("/**"):
         return wanted in text
     directory = wanted[:-3].rstrip("/")
     if not directory:
         return True
     return re.search(r"(?<![\w.-])" + re.escape(directory) + r"(?![\w.-])", text) is not None
+
+
+def context_path_claimed(context_path: str, files_read: Sequence[str]) -> bool:
+    """Whether the worker's own ``files_read`` list names a context path (a claim, not bridge-side evidence).
+
+    Separators and case are normalised, a leading ``./`` and an absolute prefix are ignored, and a ``dir/**``
+    path is claimed by any listed file below that directory.
+    """
+    wanted = context_path.replace("\\", "/").lower().removeprefix("./")
+    directory = wanted[:-3].rstrip("/") if wanted.endswith("/**") else None
+    for raw in files_read:
+        item = re.sub(r"/{2,}", "/", str(raw).replace("\\", "/").lower()).removeprefix("./")
+        if directory is not None:
+            if not directory or item == directory or item.startswith(directory + "/") or ("/" + directory + "/") in item:
+                return True
+        elif item == wanted or item.endswith("/" + wanted):
+            return True
+    return False
 
 
 def revision_target_state(result: dict[str, Any]) -> str:

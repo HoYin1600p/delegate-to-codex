@@ -25,10 +25,13 @@ class ProcessResult:
     output_truncated: bool = False
     lines_skipped: int = 0  # stdout lines the line callback could not take (over the line limit, it raised, or late)
     stdout_abandoned: bool = False  # the stdout reader was still running when the call returned: lines may be missing
+    orphans_killed: bool = False  # a descendant outlived the leader and held the pipes past the grace; it was killed
 
 
 # After a kill, give the pipes this long to drain before giving up on any further output.
 OUTPUT_GRACE_SECONDS = 10.0
+# After the leader exits, the pipes get this long to end; past it, a descendant (e.g. a Gradle daemon) is holding them.
+LEADER_EXIT_PIPE_GRACE_SECONDS = 15.0
 CALLBACK_CLOSE_SECONDS = 5.0  # bounded wait for a running line callback once the run is over
 
 _PROCESS_TERMINATE = 0x0001
@@ -450,17 +453,26 @@ def _write_stdin(stream: Any, data: bytes) -> None:
 
 
 def _await_exit_and_output(process: subprocess.Popen, readers: Sequence[threading.Thread], started: float,
-                           timeout_seconds: float) -> None:
+                           timeout_seconds: float, job: _WindowsJob | None = None) -> bool:
     """Wait for the leader to exit and for every pipe to reach its end, all within the time limit.
 
-    A descendant that outlives the leader keeps the pipes open, which counts as still running.
+    While the leader runs, the full time limit applies. Once it has exited, the pipes get at most
+    LEADER_EXIT_PIPE_GRACE_SECONDS to end; a reader still blocked after that means an orphaned descendant (for
+    example a Gradle daemon) holds the pipe, so the rest of the tree is killed, the pipes are drained, and the
+    call returns True (orphans killed) instead of waiting out the full timeout.
     """
     deadline = started + timeout_seconds
     process.wait(timeout=max(deadline - time.monotonic(), 0))
+    grace_end = min(time.monotonic() + LEADER_EXIT_PIPE_GRACE_SECONDS, deadline)
     for reader in readers:
-        reader.join(timeout=max(deadline - time.monotonic(), 0))
-        if reader.is_alive():
-            raise subprocess.TimeoutExpired(process.args, timeout_seconds)
+        reader.join(timeout=max(grace_end - time.monotonic(), 0))
+    if not any(reader.is_alive() for reader in readers):
+        return False
+    if time.monotonic() >= deadline:
+        raise subprocess.TimeoutExpired(process.args, timeout_seconds)
+    _kill_tree(process, job)
+    _drain_after_kill(process, readers)
+    return True
 
 
 def _drain_after_kill(process: subprocess.Popen, readers: Sequence[threading.Thread]) -> None:
@@ -523,6 +535,7 @@ def run_process(
                          name="process-input", daemon=True).start()
     timed_out = False
     interrupted = False
+    orphans_killed = False
     cancelled_by_request = threading.Event()
     watcher_stop = threading.Event()
 
@@ -540,7 +553,7 @@ def run_process(
         watcher = threading.Thread(target=watch_for_cancellation, name="process-cancellation", daemon=True)
         watcher.start()
     try:
-        _await_exit_and_output(process, readers, started, timeout_seconds)
+        orphans_killed = _await_exit_and_output(process, readers, started, timeout_seconds, job)
     except subprocess.TimeoutExpired:
         timed_out = True
         _kill_tree(process, job)
@@ -576,4 +589,5 @@ def run_process(
         output_truncated=any(capture.dropped for capture in captures),
         lines_skipped=captures[0].lines_skipped,
         stdout_abandoned=stdout_abandoned,
+        orphans_killed=orphans_killed,
     )

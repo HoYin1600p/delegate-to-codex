@@ -107,7 +107,7 @@ python -B "${CLAUDE_SKILL_DIR}/scripts/codex_bridge.py" cleanup --task "<task.js
   scope is wrong. Reuse passing checks for identical code; broaden checks only for changed code, failures or concrete
   risk.
 - Bridge validation is the acceptance evidence even when the worker's checks are `not_run`.
-  `revalidate --task T --artifact A [--timeout N]` reruns it (1-1800 seconds); review the refreshed patch afterwards.
+  `revalidate --task T --artifact A [--timeout N]` reruns it (1-7200 seconds); review the refreshed patch afterwards.
   If you changed the primary repository's hooks, aliases or filters yourself while a run was open, the result and
   `accept` name them; `revalidate --accept-repo-config-change` accepts your change. Extensions, killed runs and stale
   locks: [recovery workflow](references/codex-workflow.md).

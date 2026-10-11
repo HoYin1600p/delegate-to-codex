@@ -54,6 +54,16 @@ class ScrubbedEnvironments(BridgeCase):
         self.assertEqual(report["passthrough"], ["MY_OPT_IN_SECRET"])
         self.assertNotIn("hunter2", json.dumps(result))
 
+    def test_folder_shortcuts_reach_worker_and_validation_but_secrets_do_not(self):
+        source = {"REPOS": "D:/My Repo's", "WORKSPACES": "D:/My Repo's/Workspaces",
+                  "REPOS_TOKEN": "x", "PATH": "C:/bin"}
+        for extra in (bridge.WORKER_ENV_ALLOW, ()):  # the worker's list, then validation's
+            kept, report = bridge.scrub_environment(source, extra_allow=extra)
+            self.assertEqual(kept["REPOS"], "D:/My Repo's")
+            self.assertEqual(kept["WORKSPACES"], "D:/My Repo's/Workspaces")
+            self.assertNotIn("REPOS_TOKEN", kept)
+            self.assertEqual(report["path_variables"], ["REPOS", "WORKSPACES"])
+
     def test_the_worker_trusts_only_its_own_checkout_for_git(self):
         environment, _ = bridge.worker_environment(self.tmp / "wt")
         self.assertEqual(environment["GIT_CONFIG_COUNT"], "1")

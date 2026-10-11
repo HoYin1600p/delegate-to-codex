@@ -101,7 +101,7 @@ def _parser() -> argparse.ArgumentParser:
     reval = sub.add_parser("revalidate", help="Re-run the task's validation command on the preserved worktree")
     reval.add_argument("--task", type=Path, required=True)
     reval.add_argument("--artifact", type=Path, required=True, help=ARTIFACT_HELP)
-    reval.add_argument("--timeout", type=int, default=None, help="Validation timeout in seconds (1-1800)")
+    reval.add_argument("--timeout", type=int, default=None, help="Validation timeout in seconds (1-7200)")
     reval.add_argument("--accept-repo-config-change", action="store_true",
                        help="Accept changes you made to the primary repository's code-running settings (hooks, "
                             "aliases, filters, core.hooksPath, ...) since the run started; the old and new hashes "

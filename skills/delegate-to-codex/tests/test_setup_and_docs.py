@@ -165,7 +165,7 @@ class SetupDoctorGate(unittest.TestCase):
         read = lambda name: (SKILL / name).read_text(encoding="utf-8")
         safety, task, workflow = read("references/safety.md"), read("references/task-file.md"), read("references/codex-workflow.md")
         self.assertIn("at most 50", safety)
-        self.assertIn("at most 10 paths", safety)
+        self.assertIn("two example paths", safety)
         self.assertIn("manual `continue` and `revise` rounds are unbounded", task)
         self.assertIn("never gains it", workflow)
         self.assertIn("no session id", workflow)
