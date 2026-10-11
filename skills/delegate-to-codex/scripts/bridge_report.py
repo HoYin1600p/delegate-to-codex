@@ -35,9 +35,28 @@ def clean(value: Any, limit: int = 2000) -> str:
     return CONTROL.sub("", str(value if value is not None else ""))[:limit]
 
 
-def read_json(path: Path) -> dict[str, Any]:
+def read_json(path: Path, *, mixed: bool = False) -> dict[str, Any]:
     try:
-        data = json.loads(path.read_text(encoding="utf-8-sig"))
+        text = path.read_text(encoding="utf-8-sig")
+        if mixed:
+            decoder = json.JSONDecoder()
+            data = None
+            end = 0
+            for match in re.finditer(r"(?m)^[ \t]*\{", text):
+                start = match.end() - 1
+                if start < end:
+                    continue  # A nested object belongs to the already decoded document.
+                try:
+                    candidate, end = decoder.raw_decode(text, start)
+                except json.JSONDecodeError:
+                    continue
+                if ("lifecycle_status" in candidate or "artifact" in candidate
+                        or ("status" in candidate and "task_id" in candidate)):
+                    data = candidate
+            if data is None:
+                raise SystemExit(f"bridge-report: {path} does not hold a bridge result JSON object")
+        else:
+            data = json.loads(text)
     except (OSError, ValueError) as exc:
         raise SystemExit(f"bridge-report: cannot read {path}: {exc}")
     if not isinstance(data, dict):
@@ -74,7 +93,7 @@ def locate(source: str | None, task: Path | None, latest: bool) -> tuple[dict[st
     path = Path(source)
     if path.is_dir():
         return read_json(path / "result.json"), path
-    data = read_json(path)
+    data = read_json(path, mixed=True)
     folder = data.get("artifact_directory") or data.get("artifact")
     return data, (Path(folder) if folder else (path.parent if path.name == "result.json" else None))
 

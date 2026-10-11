@@ -126,6 +126,54 @@ class ReportTests(TempCase):
             capture(bridge_report.main, [str(self.root / "missing.json")])
         self.assertIn("cannot read", str(caught.exception))
 
+    def test_stdout_report_after_warning_lines(self):
+        report = {"task_id": "demo", "status": "complete", "lifecycle_status": "IMPLEMENTED"}
+        source = self.write("run.stdout", "bridge.py:12: UserWarning: background run\n"
+                            "  warnings.warn(message)\n{not JSON}\n" + json.dumps(report, indent=2))
+        code, out, _ = capture(bridge_report.main, [str(source), "--json"])
+        self.assertEqual(code, 0)
+        self.assertEqual(json.loads(out)["lifecycle_status"], "IMPLEMENTED")
+
+    def test_stdout_report_uses_last_bridge_result(self):
+        first = {"task_id": "demo", "status": "failed", "lifecycle_status": "BLOCKED"}
+        last = {"task_id": "demo", "status": "complete", "lifecycle_status": "IMPLEMENTED",
+                "worker": {"summary": "latest result"}}
+        source = self.write("run.stdout", json.dumps(first, indent=2) + "\nprogress line\n"
+                            + json.dumps(last, indent=2) + '\n{"message": "background process finished"}\n')
+        code, out, _ = capture(bridge_report.main, [str(source), "--json"])
+        self.assertEqual(code, 0)
+        data = json.loads(out)
+        self.assertEqual(data["lifecycle_status"], "IMPLEMENTED")
+        self.assertEqual(data["worker"]["summary"], "latest result")
+
+    def test_stdout_report_ignores_trailing_text(self):
+        report = {"task_id": "demo", "status": "complete"}
+        source = self.write("run.stdout", json.dumps(report) + "\nbackground run finished\n{incomplete")
+        code, out, _ = capture(bridge_report.main, [str(source), "--json"])
+        self.assertEqual(code, 0)
+        self.assertEqual(json.loads(out)["task_id"], "demo")
+
+    def test_stdout_report_recognizes_each_bridge_result_shape(self):
+        for report in ({"lifecycle_status": "BLOCKED"}, {"artifact": ""},
+                       {"status": "complete", "task_id": "demo"}):
+            with self.subTest(report=report):
+                source = self.write("run.stdout", "warning\n  " + json.dumps(report) + "\nfinished")
+                data, _ = bridge_report.locate(str(source), None, False)
+                self.assertEqual(data, report)
+
+    def test_stdout_report_does_not_select_nested_objects(self):
+        report = {"task_id": "demo", "status": "complete"}
+        unrelated = {"messages": [{"lifecycle_status": "BLOCKED"}]}
+        source = self.write("run.stdout", json.dumps(report) + "\n" + json.dumps(unrelated, indent=2))
+        data, _ = bridge_report.locate(str(source), None, False)
+        self.assertEqual(data, report)
+
+    def test_stdout_without_a_bridge_result_exits_with_a_message(self):
+        source = self.write("run.stdout", 'warning\n{bad JSON}\n{"status": "done"}\n')
+        with self.assertRaises(SystemExit) as caught:
+            bridge_report.locate(str(source), None, False)
+        self.assertIn("does not hold a bridge result JSON object", str(caught.exception))
+
 
 class LintTests(TempCase):
     def base(self, **changes):
