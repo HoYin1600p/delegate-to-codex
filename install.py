@@ -10,7 +10,7 @@ import sys
 from pathlib import Path
 
 SOURCE = Path(__file__).resolve().parent / "skills" / "delegate-to-codex"
-SCRIPTS = {"codex_bridge.py", "setup.py"}
+SCRIPTS = {"codex_bridge.py", "setup.py", "bridge_report.py", "task_lint.py", "task_template.py", "land.py"}
 SCHEMAS = {"task.schema.json", "reply.schema.json"}
 # Top-level files travel with the skill: the licence notice and the readme that SKILL.md and the licence refer to.
 ROOT_FILES = {"SKILL.md", "PLATFORMS.md", "README.md", "LICENSE.txt"}
