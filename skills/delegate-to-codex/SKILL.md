@@ -114,6 +114,10 @@ python -B "${CLAUDE_SKILL_DIR}/scripts/codex_bridge.py" cleanup --task "<task.js
 - Validation runs worker-written code as you, like CI would. Read [safety](references/safety.md) before delegating a
   repository you do not trust.
 
+Optional helpers in `scripts/` (no Codex call, no push): `bridge_report.py` summarizes a result and prints the bound
+`accept` command, `task_lint.py` and `task_template.py` check and start a task file, `land.py` accepts or applies,
+builds, compares and commits. See [helper tools](references/helper-tools.md).
+
 ## Capacity
 
 Work while the governing windows have capacity. Every launch is gated: exit 3 means a window is exhausted (the error

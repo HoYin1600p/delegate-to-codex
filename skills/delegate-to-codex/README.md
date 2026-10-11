@@ -39,6 +39,7 @@ The first launch also needs a one-time auto-review choice from you. The bridge n
 - `references/codex-workflow.md`: what to do in each state, extensions, capacity, killed runs.
 - `references/safety.md`: validation as your user, environment scrubbing, auto-review, what the bridge guards.
 - `references/routing-policy.md`: when to delegate and how deeply to review.
+- `references/helper-tools.md`: the optional scripts `bridge_report.py` (readable result summary), `task_lint.py` and `task_template.py` (check and start a task file), and `land.py` (accept or apply, build, compare, commit).
 
 Runtime state lives outside every Git repository, in `~/.claude/delegate-to-codex-state/` by default. No accounts, credentials or sessions are included.
 
