@@ -25,5 +25,6 @@
   ],
   "validation_timeout_seconds": 600,
   "copy_ignored": [],
-  "auto_continue": 0
+  "auto_continue": 0,
+  "speed": null
 }

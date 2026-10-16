@@ -22,6 +22,55 @@ from claude_codex_bridge.contracts import ContractError, load_task, validate_tas
 
 
 class Runs(BridgeCase):
+    def test_speed_task_field_and_flag_precedence(self):
+        for index, (task_speed, flag, expected) in enumerate((
+            ("fast", None, "fast"), ("flex", None, "flex"),
+            ("default", None, "default"), ("flex", "fast", "fast"),
+            ("fast", "flex", "flex"), ("fast", "default", "default"),
+        )):
+            with self.subTest(task_speed=task_speed, flag=flag):
+                before = len(self.calls()) if self.log.exists() else 0
+                result = bridge.run(self.task(task_id=f"speed-{index}", speed=task_speed), speed=flag)
+                self.assertEqual(result["lifecycle_status"], "REVIEW_PENDING", result["failures"])
+                calls = [c for c in self.calls()[before:] if c["argv"][:1] == ["exec"]]
+                self.assertTrue(calls)
+                for call in calls:
+                    self.assertIn(f'service_tier="{expected}"', call["argv"])
+                self.assertEqual(result["run_settings"]["speed"], expected)
+                self.assertEqual(result["requested_speed"], expected)
+                self.assertEqual(bridge.brief(result)["run"]["speed"], expected)
+
+    def test_unset_speed_omits_service_tier(self):
+        result = bridge.run(self.task())
+        self.assertIsNone(result["run_settings"]["speed"])
+        calls = [c for c in self.calls() if c["argv"][:1] == ["exec"]]
+        self.assertTrue(calls)
+        self.assertFalse(any(arg.startswith("service_tier=") for c in calls for arg in c["argv"]))
+
+    def test_speed_cli_flag_is_forwarded(self):
+        with mock.patch.object(bridge, "run", return_value={"status": "complete"}) as run:
+            with mock.patch.object(bridge, "brief", return_value={}), mock.patch("sys.stdout", new_callable=io.StringIO):
+                self.assertEqual(cli.main(["run", "--task", "task.json", "--speed", "fast"]), 0)
+        self.assertEqual(run.call_args.kwargs["speed"], "fast")
+
+    def test_continue_and_revise_reuse_recorded_speed(self):
+        os.environ["FAKE_CODEX_SCENARIO"] = "extension"
+        task = self.task(speed="flex")
+        first = bridge.run(task, speed="fast")
+        artifact = Path(first["artifact_directory"])
+        continued = bridge.continue_task(task, artifact, 4)
+        self.assertEqual(continued["lifecycle_status"], "REVIEW_PENDING", continued["failures"])
+        feedback = self.tmp / "feedback.json"
+        feedback.write_text(json.dumps({"findings": [{"path": "hello.py", "issue": "No main guard",
+                                                     "expected_behavior": "Add a main guard"}]}))
+        revised = bridge.revise_task(task, artifact, feedback, 3)
+        self.assertEqual(revised["lifecycle_status"], "REVIEW_PENDING", revised["failures"])
+        self.assertEqual(revised["run_settings"]["speed"], "fast")
+        calls = [c for c in self.calls() if c["argv"][:1] == ["exec"]]
+        self.assertGreaterEqual(len(calls), 3)
+        for call in calls:
+            self.assertIn('service_tier="fast"', call["argv"])
+
     def test_validation_failure_with_unrelated_primary_change_remains_revisable(self):
         task = self.task(validation_command=[sys.executable, "-c", "import sys; sys.exit(1)"])
         segment = bridge._segment
@@ -186,9 +235,11 @@ class Runs(BridgeCase):
 
     def test_unstructured_reply_triggers_checkpoint(self):
         os.environ["FAKE_CODEX_SCENARIO"] = "badjson"
-        result = bridge.run(self.task())
+        result = bridge.run(self.task(), speed="flex")
         self.assertEqual(result["lifecycle_status"], "REVIEW_PENDING", result["failures"])
         self.assertIsNotNone(result["segments"][0]["checkpoint"])
+        checkpoint = [c for c in self.calls() if c["argv"][:2] == ["exec", "resume"]][-1]
+        self.assertIn('service_tier="flex"', checkpoint["argv"])
 
     def test_read_only_review_task_uses_read_only_sandbox(self):
         result = bridge.run(self.task(mode="review", allowed_changed_paths=[], validation_command=None))
@@ -291,7 +342,7 @@ class Robustness(BridgeCase):
 
     def test_auto_continue_resumes_with_progress_and_records_grant(self):
         os.environ["FAKE_CODEX_SCENARIO"] = "extension"
-        result = bridge.run(self.task(auto_continue=1))
+        result = bridge.run(self.task(auto_continue=1, speed="flex"), speed="fast")
         self.assertEqual(result["lifecycle_status"], "REVIEW_PENDING", result["failures"])
         self.assertEqual(result["validation"]["status"], "passed")
         self.assertEqual(len(result["segments"]), 2)
@@ -299,6 +350,10 @@ class Robustness(BridgeCase):
         self.assertEqual(result["auto_continuations"][0]["outcome_lifecycle_status"], "REVIEW_PENDING")
         self.assertIn("auto_continuations", bridge.brief(result))
         self.assertEqual({s["session_id"] for s in result["segments"]}, {result["session_id"]})
+        self.assertEqual(result["run_settings"]["speed"], "fast")
+        for call in self.calls():
+            if call["argv"][:1] == ["exec"]:
+                self.assertIn('service_tier="fast"', call["argv"])
 
     def test_auto_continue_stops_without_progress(self):
         for scenario, expected_segments in (("extension_empty", 1), ("extension_stalled", 2)):

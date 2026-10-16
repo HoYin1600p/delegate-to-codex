@@ -15,6 +15,7 @@ MODES = {"analyze", "implement", "review", "test"}
 # Control characters include the C1 range U+0080-U+009F.
 MODEL_RE = re.compile(r"^[^\s\x00-\x1f\x7f-\x9f-][^\s\x00-\x1f\x7f-\x9f]{0,127}$")
 RISK_LEVELS = {"low", "medium", "high"}
+SPEEDS = {"default", "fast", "flex"}
 # Defaults for fields that are almost always the same, so the lead writes only task-specific values.
 DEFAULT_MAX_TURNS = 6
 DEFAULT_TIMEOUT_SECONDS = 1800
@@ -34,6 +35,7 @@ TASK_FIELDS = {
     "locked_decisions",
     "stop_conditions",
     "model",
+    "speed",
     "max_turns",
     "max_total_turns",
     "max_extensions",
@@ -69,6 +71,7 @@ class Task:
     locked_decisions: tuple[str, ...]
     stop_conditions: tuple[str, ...]
     model: str | None
+    speed: str | None
     max_turns: int
     max_total_turns: int | None
     max_extensions: int | None
@@ -227,6 +230,10 @@ def validate_task(raw: dict[str, Any], *, allow_missing_validation: bool = False
     if isinstance(model, str) and not MODEL_RE.fullmatch(model.strip()):
         raise ContractError("model must be one identifier: no whitespace and not starting with '-'")
 
+    speed = raw.get("speed")
+    if speed is not None and (not isinstance(speed, str) or speed not in SPEEDS):
+        raise ContractError(f"speed must be null or one of {sorted(SPEEDS)}")
+
     max_turns = raw.get("max_turns", DEFAULT_MAX_TURNS)
     if not isinstance(max_turns, int) or isinstance(max_turns, bool) or not 1 <= max_turns <= 12:
         raise ContractError("max_turns must be an integer from 1 through 12")
@@ -293,6 +300,7 @@ def validate_task(raw: dict[str, Any], *, allow_missing_validation: bool = False
         locked_decisions=locked_decisions,
         stop_conditions=stop_conditions,
         model=model.strip() if isinstance(model, str) else None,
+        speed=speed,
         max_turns=max_turns,
         max_total_turns=max_total_turns,
         max_extensions=max_extensions,

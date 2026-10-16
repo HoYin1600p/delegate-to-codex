@@ -85,6 +85,7 @@ def _parser() -> argparse.ArgumentParser:
     run.add_argument("--task", type=Path, required=True)
     run.add_argument("--model", default=None, help="Codex model id for this run (overrides the task's model; omit for the Codex default)")
     run.add_argument("--effort", default=None, help="Reasoning effort: low, medium, high, xhigh or max (the Codex CLI decides what a model accepts)")
+    run.add_argument("--speed", default=None, help="Service tier: default, fast or flex (overrides the task's speed)")
     cont = sub.add_parser("continue", help="Grant more work to a valid extension request in the same session")
     cont.add_argument("--task", type=Path, required=True)
     cont.add_argument("--artifact", type=Path, required=True, help=ARTIFACT_HELP)
@@ -157,7 +158,7 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "check-task":
             result = bridge.check_task(args.task)
         elif args.command == "run":
-            result = bridge.run(args.task, model=args.model, effort=args.effort)
+            result = bridge.run(args.task, model=args.model, effort=args.effort, speed=args.speed)
         elif args.command == "continue":
             result = bridge.continue_task(args.task, args.artifact, args.grant_turns)
         elif args.command == "revise":

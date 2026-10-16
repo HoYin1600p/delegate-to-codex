@@ -117,6 +117,14 @@ class SchemaMatchesValidator(unittest.TestCase):
             "blank model": self.case(model="  "),
             "null model": self.case(model=None),
             "named model": self.case(model="gpt-x"),
+            "null speed": self.case(speed=None),
+            "default speed": self.case(speed="default"),
+            "fast speed": self.case(speed="fast"),
+            "flex speed": self.case(speed="flex"),
+            "unknown speed": self.case(speed="turbo"),
+            "blank speed": self.case(speed=""),
+            "non-string speed": self.case(speed=True),
+            "list speed": self.case(speed=[]),
             "blank objective": self.case(objective="  "),
             "blank list entry": self.case(locked_decisions=[" "]),
             "empty acceptance": self.case(acceptance_criteria=[]),
@@ -301,6 +309,16 @@ class ContractPaths(BridgeCase):
 
 
 class LaunchChecks(BridgeCase):
+    def test_speed_defaults_and_invalid_values(self):
+        task = load_task(self.task())
+        self.assertIsNone(task.speed)
+        for bad in ("turbo", "", "FAST", " fast ", True, [], {}):
+            with self.subTest(speed=bad):
+                with self.assertRaisesRegex(ContractError, "speed"):
+                    load_task(self.task(speed=bad))
+                with self.assertRaisesRegex(bridge.BridgeError, "speed must be one of"):
+                    bridge._settings(None, None, task, speed=bad)
+
     def test_check_task_rejects_ids_that_cannot_make_a_branch_or_a_lock(self):
         for bad in ("v1..2", "nul", "con.json"):
             with self.subTest(task_id=bad):

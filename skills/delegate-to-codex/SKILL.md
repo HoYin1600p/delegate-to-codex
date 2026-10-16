@@ -40,11 +40,12 @@ and limit: [task file](references/task-file.md).
 ## Run
 
 ```bash
-python -B "${CLAUDE_SKILL_DIR}/scripts/codex_bridge.py" run --task "<task.json>" [--model <model-id>] [--effort medium]
+python -B "${CLAUDE_SKILL_DIR}/scripts/codex_bridge.py" run --task "<task.json>" [--model <model-id>] [--effort medium] [--speed fast]
 ```
 
 Use the model the user names, or leave `--model` unset for the Codex default. Start at `--effort medium` and raise it
 only for hard reasoning (`low` to `max`; the Codex CLI decides what a model accepts).
+`--speed default|fast|flex` overrides the task's `speed`: fast spends plan usage faster; flex is slower/cheaper. Omit both for the Codex default.
 
 You choose the worker count; parallel tasks need separate ids and files and non-overlapping paths. Launch each once
 with Bash `run_in_background`, end the turn and read its completion notice. Never relaunch for silence, poll, monitor

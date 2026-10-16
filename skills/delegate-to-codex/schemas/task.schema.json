@@ -106,6 +106,12 @@
       "default": null,
       "description": "Null, or one model identifier of at most 128 characters: no whitespace, not starting with '-'. The run command's --model overrides it."
     },
+    "speed": {
+      "type": ["string", "null"],
+      "enum": ["default", "fast", "flex", null],
+      "default": null,
+      "description": "Codex service tier. The run command's --speed overrides it; null leaves the Codex default."
+    },
     "max_turns": {
       "type": "integer",
       "minimum": 1,

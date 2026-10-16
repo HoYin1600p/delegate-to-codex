@@ -33,6 +33,7 @@ One JSON file per task, saved outside the repository. Start from [assets/task.te
 | `review_required` | `true` | `false` makes a completed result `IMPLEMENTED` instead of `REVIEW_PENDING`. |
 | `plan_status` | `READY` | Only `READY` is accepted. |
 | `model` | `null` | One identifier: no whitespace, not starting with `-`. `run --model` overrides it for that run. |
+| `speed` | `null` | Codex service tier: `default`, `fast` or `flex`. `run --speed` overrides it; continue/revise reuse the recorded choice. `null` sends no service tier override. Fast spends plan usage faster; flex is slower/cheaper. |
 | `max_turns` | 6 | 1-12. A budget of work steps told to the worker for one segment, not a Codex turn cap. |
 | `timeout_seconds` | 1800 | 5-7200. Bounds one worker segment. |
 | `max_total_turns` | none | Ignored. Still accepted so a task file written for 1.0.0 loads; use `max_turns`, `timeout_seconds` and `max_extensions`. |

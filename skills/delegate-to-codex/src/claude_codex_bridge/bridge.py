@@ -24,7 +24,7 @@ from . import settings as user_settings
 from .codexcli import CodexCliError, CodexCommand, billing_overrides, check_subscription_account, codex_version
 from .codexcli import fetch_usage, find_codex, read_account_and_limits, classify_usage, read_usage_cache
 from .codexcli import cached_codex_version, executable_fingerprint
-from .contracts import MODEL_RE, Task, load_task
+from .contracts import MODEL_RE, SPEEDS, Task, load_task
 from .gitops import (
     BridgeError, UnsafeWorktree, WorktreeTampered, _git, _git_bytes, _git_retry, _guard, _split_paths,
     _verify_repository, _worktree_fingerprint, active_task_record, apply_patch, atomic_write_json, branch_name_valid,
@@ -421,7 +421,8 @@ def _approval_config(auto_review: bool) -> list[str]:
     return ["-c", 'approval_policy="never"']
 
 
-def _common_config(task: Task, sandbox: str, effort: str | None, auto_review: bool = False) -> list[str]:
+def _common_config(task: Task, sandbox: str, effort: str | None, auto_review: bool = False,
+                   speed: str | None = None) -> list[str]:
     args = [
         "--json", "--ignore-user-config",
         *_approval_config(auto_review),
@@ -434,12 +435,15 @@ def _common_config(task: Task, sandbox: str, effort: str | None, auto_review: bo
         args.extend(["-m", task.model])
     if effort:
         args.extend(["-c", f'model_reasoning_effort="{effort}"'])
+    if speed is not None:
+        args.extend(["-c", f'service_tier="{speed}"'])
     return args
 
 
 def _exec_args(command: CodexCommand, task: Task, worktree: Path, schema: Path, last: Path,
-               *, sandbox: str, effort: str | None, resume: str | None, auto_review: bool = False) -> list[str]:
-    common = _common_config(task, sandbox, effort, auto_review) + ["--output-schema", str(schema), "-o", str(last)]
+               *, sandbox: str, effort: str | None, resume: str | None, auto_review: bool = False,
+               speed: str | None = None) -> list[str]:
+    common = _common_config(task, sandbox, effort, auto_review, speed) + ["--output-schema", str(schema), "-o", str(last)]
     if resume:
         return command.args("exec", "resume", *common, resume, "-")
     return command.args("exec", *common, "-s", sandbox, "-C", str(worktree), "-")
@@ -744,7 +748,8 @@ def _resumed_settings(task: Task, recorded: Mapping[str, Any]) -> dict[str, Any]
 
 def _run_codex(command: CodexCommand, task: Task, worktree: Path, artifact: Path, label: str, prompt: str,
                *, sandbox: str, effort: str | None, resume: str | None, timeout: int,
-               env: Mapping[str, str] | None = None, auto_review: bool = False) -> tuple[ProcessResult, dict, str]:
+               env: Mapping[str, str] | None = None, auto_review: bool = False,
+               speed: str | None = None) -> tuple[ProcessResult, dict, str]:
     schema = _strict_schema(artifact / "reply.output-schema.json")
     last = artifact / f"{label}.last-message.txt"
     last.unlink(missing_ok=True)  # a retried label must not read the previous attempt's final message
@@ -753,7 +758,7 @@ def _run_codex(command: CodexCommand, task: Task, worktree: Path, artifact: Path
         env = worker_environment(worktree)[0]
     events = EventSummary()  # fed every stdout line as it arrives, so the capture's dropped middle loses no event
     process = run_process(command.executable, _exec_args(command, task, worktree, schema, last, sandbox=sandbox,
-                                                         effort=effort, resume=resume, auto_review=auto_review),
+                                                         effort=effort, resume=resume, auto_review=auto_review, speed=speed),
                           cwd=worktree, timeout_seconds=timeout, stdin_text=prompt, env=env,
                           on_stdout_line=events.feed)
     (artifact / f"{label}.events.jsonl").write_text(process.stdout, encoding="utf-8")
@@ -764,7 +769,8 @@ def _run_codex(command: CodexCommand, task: Task, worktree: Path, artifact: Path
 
 
 def _segment(command: CodexCommand, task: Task, worktree: Path, artifact: Path, label: str, prompt: str,
-             *, effort: str | None, resume: str | None = None, auto_review: bool = False) -> dict[str, Any]:
+             *, effort: str | None, resume: str | None = None, auto_review: bool = False,
+             speed: str | None = None) -> dict[str, Any]:
     sandbox = "workspace-write" if task.mode in WRITING_MODES else "read-only"
     writing = task.mode in WRITING_MODES
     env, env_report = worker_environment(worktree)
@@ -773,13 +779,13 @@ def _segment(command: CodexCommand, task: Task, worktree: Path, artifact: Path, 
     ignored_stamps = _ignored_stamps(worktree, ignored_before) if ignored_before else {}
     process, parsed, final = _run_codex(command, task, worktree, artifact, label, prompt, sandbox=sandbox,
                                         effort=effort, resume=resume, timeout=task.timeout_seconds, env=env,
-                                        auto_review=auto_review)
+                                        auto_review=auto_review, speed=speed)
     claim, error = parse_claim(final)
     time_cap = bool(process.timed_out and parsed["thread_id"])
     checkpoint = None
     if claim is None and parsed["thread_id"] and not process.interrupted and (process.exit_code == 0 or time_cap):
         claim, error, checkpoint = _checkpoint(command, task, worktree, artifact, label, parsed["thread_id"], effort,
-                                               env, auto_review, time_cap=time_cap)
+                                               env, auto_review, time_cap=time_cap, speed=speed)
     failure_text = parsed["turn_failed"] or (parsed["errors"][-1] if parsed["errors"] and process.exit_code else None)
     error_kind = classify_error(failure_text)
     rejections = process.stderr.count(POLICY_REJECTION)
@@ -807,7 +813,8 @@ def _segment(command: CodexCommand, task: Task, worktree: Path, artifact: Path, 
 
 def _checkpoint(command: CodexCommand, task: Task, worktree: Path, artifact: Path, label: str, thread_id: str,
                 effort: str | None, env: Mapping[str, str] | None = None,
-                auto_review: bool = False, time_cap: bool = False) -> tuple[dict | None, str | None, dict[str, Any]]:
+                auto_review: bool = False, time_cap: bool = False,
+                speed: str | None = None) -> tuple[dict | None, str | None, dict[str, Any]]:
     writing = task.mode in WRITING_MODES
     try:
         before = _worktree_fingerprint(worktree, task.base_commit) if writing else None
@@ -824,7 +831,7 @@ def _checkpoint(command: CodexCommand, task: Task, worktree: Path, artifact: Pat
     process, parsed, final = _run_codex(command, task, worktree, artifact, f"{label}.checkpoint", prompt,
                                         sandbox="read-only", effort=effort, resume=thread_id,
                                         timeout=min(task.timeout_seconds, CHECKPOINT_TIMEOUT_SECONDS), env=env,
-                                        auto_review=auto_review)
+                                        auto_review=auto_review, speed=speed)
     claim, error = parse_claim(final)
     try:
         moved = before is not None and _worktree_fingerprint(worktree, task.base_commit) != before
@@ -1565,6 +1572,7 @@ def _finish(task: Task, artifact: Path, worktree: Path, seg: dict[str, Any], pri
         "artifact_directory": str(artifact), "repository": str(task.repo_root), "starting_commit": task.base_commit,
         "worktree": str(worktree), "session_id": seg["thread_id"],
         "requested_model": run_settings.get("model"), "requested_reasoning_effort": run_settings.get("effort"),
+        "requested_speed": run_settings.get("speed"),
         "process": _process_record(process), "codex_claim": claim, "error_kind": seg["error_kind"],
         "changed_paths": changed, "unauthorized_changed_paths": unauthorized, "diff_path": str(diff_path),
         "snapshot_tree": tree, "patch_sha256": patch_sha256,
@@ -1655,14 +1663,17 @@ def auto_review_report(task: Task | None = None) -> dict[str, Any]:
 
 
 def _settings(model: str | None, effort: str | None, task: Task,
-              review: Mapping[str, Any] | None = None) -> tuple[Task, dict[str, Any]]:
+              review: Mapping[str, Any] | None = None, *, speed: str | None = None) -> tuple[Task, dict[str, Any]]:
     selected = model or task.model
     if selected is not None and not MODEL_RE.fullmatch(selected):
         raise BridgeError("model must be one identifier without spaces, not starting with '-'")
     if effort is not None and effort not in EFFORTS:
         raise BridgeError(f"effort must be one of {sorted(EFFORTS)}")
+    speed = task.speed if speed is None else speed
+    if speed is not None and (not isinstance(speed, str) or speed not in SPEEDS):
+        raise BridgeError(f"speed must be one of {sorted(SPEEDS)}")
     windows = windows_sandbox_mode() if os.name == "nt" else None
-    return replace(task, model=selected), {"model": selected, "effort": effort, "windows_sandbox": windows,
+    return replace(task, model=selected), {"model": selected, "effort": effort, "speed": speed, "windows_sandbox": windows,
                                            **(review or {})}
 
 
@@ -1836,7 +1847,7 @@ def _auto_continue(task: Task, artifact: Path, worktree: Path, record: dict,
         _begin_segment(artifact, record, label, "auto_continue")
         seg = _segment(command, task, worktree, artifact, label,
                        _assignment(task, continuation=request, granted=granted),
-                       effort=settings.get("effort"), resume=record["session_id"],
+                       effort=settings.get("effort"), speed=settings.get("speed"), resume=record["session_id"],
                        auto_review=settings.get("auto_review") == "on")
         if seg["thread_id"] not in (None, record["session_id"]):
             seg["error"] = "Codex resumed a different session"
@@ -1883,7 +1894,8 @@ def _require_reported(task: Task, artifact: Path, patch_sha256: str) -> None:
                           "before accepting")
 
 
-def run(task_file: Path, *, model: str | None = None, effort: str | None = None) -> dict[str, Any]:
+def run(task_file: Path, *, model: str | None = None, effort: str | None = None,
+        speed: str | None = None) -> dict[str, Any]:
     task = load_task(task_file)
     review = _auto_review_for(task)  # refuses (nothing created) until the user has chosen
     _verify_repository(task)
@@ -1891,7 +1903,7 @@ def run(task_file: Path, *, model: str | None = None, effort: str | None = None)
     if task.copy_ignored and task.mode not in WRITING_MODES:
         raise BridgeError("copy_ignored requires an implement or test task")
     inventory = _ignored_inventory(task)
-    task, settings = _settings(model, effort, task, review)
+    task, settings = _settings(model, effort, task, review, speed=speed)
     root = _artifact_root_ready(create=True)
     pre = preflight()
     command = _command_from(pre)
@@ -1932,7 +1944,7 @@ def run(task_file: Path, *, model: str | None = None, effort: str | None = None)
             write_json(artifact / "result.json", record)
             auto_review = settings["auto_review"] == "on"
             seg = _segment(command, task, worktree, artifact, "initial", _assignment(task, auto_review=auto_review),
-                           effort=settings["effort"], auto_review=auto_review)
+                           effort=settings["effort"], speed=settings.get("speed"), auto_review=auto_review)
             record.update(session_id=seg["thread_id"], phase="finishing")
             write_json(artifact / "result.json", record)
             prior = {"preflight": pre, "usage_before": usage_before, "copy_ignored": inventory, "branch": branch,
@@ -2049,7 +2061,7 @@ def continue_task(task_file: Path, artifact_path: Path, granted: int) -> dict[st
         try:
             seg = _segment(command, task, worktree, artifact, label,
                            _assignment(task, continuation=request, granted=granted),
-                           effort=settings.get("effort"), resume=prior["session_id"],
+                           effort=settings.get("effort"), speed=settings.get("speed"), resume=prior["session_id"],
                            auto_review=settings.get("auto_review") == "on")
             if seg["thread_id"] not in (None, prior["session_id"]):
                 seg["error"] = "Codex resumed a different session"
@@ -2115,7 +2127,7 @@ def revise_task(task_file: Path, artifact_path: Path, feedback_file: Path | dict
         try:
             seg = _segment(command, task, worktree, artifact, label,
                            _assignment(task, revision=feedback["findings"], granted=granted),
-                           effort=settings.get("effort"), resume=prior["session_id"],
+                           effort=settings.get("effort"), speed=settings.get("speed"), resume=prior["session_id"],
                            auto_review=settings.get("auto_review") == "on")
             if seg["thread_id"] not in (None, prior["session_id"]):
                 seg["error"] = "Codex resumed a different session"
@@ -2680,6 +2692,7 @@ def brief(record: dict[str, Any]) -> dict[str, Any]:
         out["usage"] = _usage_brief(record.get("usage_after"))
     settings = record.get("run_settings") or {}
     out["run"] = {"model": settings.get("model"), "effort": settings.get("effort"),
+                  "speed": settings.get("speed"),
                   "auto_review": settings.get("auto_review", "off"),
                   "auto_review_source": _clean(settings.get("auto_review_source")
                                                or "not recorded (the run began before this setting existed)")}
